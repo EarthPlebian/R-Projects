@@ -1,0 +1,43 @@
+---
+title: "Fuzzy Logic Induced Content-Based Recommendation"
+author: "EarthPleabian"
+output: html_notebook
+---
+
+In this project, we will understand how a content-based recommendation system works and a simple example will be conducted.In this project, we will understand how a content-based recommendation system works through a simple example. The dataset that will be used is the wine dataset from https://archive.ics.uci.edu/ml/datasets/wine.
+
+This dataset is the result of the chemical analysis of wine grown in the same region in Italy. We have data from three different cultivars (From an assemblage of plants selected for desirable characters).
+
+To extract the data from UCI machine learning repository we can use:
+
+```{r}
+library(data.table)
+wine.data <-fread('https://archive.ics.uci.edu/ml/machine-learning-databases/wine/wine.data')
+head(wine.data)
+```
+We have a total of 14 columns. The column number 1, named V1 represents the cultivar. The distribution of the V1 column:
+```{r}
+table(wine.data$V1)
+```
+Next we separate between cultivar (`wine.type`) and the chemical properties of the wine (`wine.features`). `wine.features` has all the properties and without the cultivar column. Let's scale this `wine.features` and create a matrix
+```{r}
+wine.type <- wine.data[,1]
+wine.features <- wine.data[,-1]
+
+wine.features.scaled <- data.frame(scale(wine.features))
+wine.mat <- data.matrix(wine.features.scaled)
+```
+We have converted our data frame to a matrix. Next we add the row names and give an integer number for each wine:
+```{r}
+rownames(wine.mat) <- seq(1:dim(wine.features.scaled)[1])
+wine.mat[1:2,]
+```
+We want to find the pearson coefficient between the rows. We want the similarity between two wines. Hence we will transpose our matrix before invoking `cor` function.
+```{r}
+wine.mat <- t(wine.mat)
+cor.matrix <- cor(wine.mat, use = "pairwise.complete.obs", method ="pearson")
+dim(cor.matrix)
+cor.matrix[1:5,1:5]
+```
+Here, our output is the similarity between the different wines. The `cor.matrix` matrix is the similarity matrix, which shows how closely related items are. The values range from -1 for perfect negative correlation, when two items have attributes that move in opposite directions, and +1 for perfect positive correlation, when attributes for the two items move in the same direction. For example, in row 1, wine 1 is more similar to wine 2 than wine 3. The diagonal values will be +1, as we are comparing a wine to itself.
+
