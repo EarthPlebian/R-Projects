@@ -1,0 +1,258 @@
+---
+title: "Fuzzy Logic Induced Content-Based Recommendation"
+author: "EarthPleabian"
+output:
+  pdf_document: default
+  html_notebook: default
+---
+## Data Preparation and Processing
+In this project, we use news articles from different publishers. Each article belongs to a different category: technical, entertainment, and others. This data is a subset of the news aggregator dataset from https://archive.ics.uci.edu/ml/datasets/News+Aggregator.
+
+```{r}
+library(tidyverse)
+library(tidytext)
+library(tm)
+library(slam)
+library(dplyr)
+library(sentimentr)
+
+set.seed(139)
+
+cnames <- c('ID' , 'TITLE' , 'URL' , 'PUBLISHER' , 'CATEGORY' , 'STORY' , 'HOSTNAME' , 'TIMESTAMP')
+
+data <- read_tsv('newsCorpus.csv', col_names = cnames, col_types = cols(ID = col_integer(), TITLE = col_character(), URL = col_character(), PUBLISHER = col_character(), CATEGORY = col_character(), STORY = col_character(), HOSTNAME = col_character(), TIMESTAMP = col_double()))
+
+head(data)
+```
+Every article has the following columns:
+* `ID`: A unique identifier  
+* `TITLE`: The title of the article (free text)  
+* `URL`: The article's URL  
+* `PUBLISHER`: Publisher of the article  
+* `CATEGORY`: Some categorization under which the articles are grouped  
+* `STORY`: An ID for the group of stories the article belongs to  
+* `HOSTNAME`: Hostname of the URL  
+* `TIMESTAMP`: Timestamp published  
+
+The following are some distinct publishers and categories:
+```{r}
+data %>% group_by(PUBLISHER) %>% summarise()
+data %>% group_by(CATEGORY) %>% summarise()
+```
+There are around 10,900 publishers and four categories. We will randomly select a sample of 5000 publishers and get the top 100 publishers by looking at the number of articles they have published:
+```{r}
+data <- sample_n(data, 5000)
+publisher.count <- data.frame(data %>% group_by(PUBLISHER) %>%summarise(ct =n()))
+publisher.top <- head(publisher.count[order(-publisher.count$ct),],100)
+head(publisher.top)
+```
+We can see that `Reuters` tops the list. We have retained only the articles from the top 100 publishers list for our exercise. Data frame `publisher.top` has the top 100 publishers. Now we will get the top 100 publishers, their articles, and other information.
+```{r}
+data.subset <- inner_join(publisher.top, data)
+head(data.subset)
+dim(data.subset)
+```
+We join our top 100 publishers data frame `publisher.top` with data, get all the details for
+our top 100 publishers. Our `data.subset` has a total of 1,366 articles.
+
+## Designing the content-based recommendation engine
+To begin with, we separate our data into two data frames. Then We will be using the `tm` package in R to work with our text data. Next, we do some processing of the text data.
+```{r}
+title.df <- data.subset[,c('ID','TITLE')]
+colnames(title.df) <- c('doc_id','text')
+others.df <- data.subset[,c('ID','PUBLISHER','CATEGORY')]
+
+library(tm)
+title.reader <- DataframeSource(title.df)
+corpus <- Corpus(title.reader)
+readerControl=list(reader=title.reader)
+
+getTransformations()
+```
+Calling `getTransformation` shows us the list of available functions that can be used to transform the text:
+```{r}
+corpus <- tm_map(corpus, removeNumbers)
+corpus <- tm_map(corpus, removePunctuation)
+corpus <- tm_map(corpus, stripWhitespace)
+corpus <- tm_map(corpus, content_transformer(tolower))
+corpus <- tm_map(corpus, removeWords, stopwords("english"))
+```
+We remove punctuation, numbers, unnecessary white spaces, and stop words from our articles. Finally, we convert our text to lowercase. Punctuation, numbers, and whitespace may not be a good feature to distinguish one article from another. Hence, we remove them.
+
+Finally, we proceed to build our document term matrix
+```{r}
+dtm <- DocumentTermMatrix(corpus, control=list(wordlenth = c(3,10),weighting = "weightTfIdf"))
+inspect(dtm[1:5,10:15])
+```
+We use the `DocumentTermMatrix` function to create our matrix. We pass our text corpus and also pass a list to the parameter `control`. Inside the list, we say that we are interested only in words with length, so the number of characters between 3 and 10. For our cell values in our matrix, we want them to be TFIDF. Having created a document term matrix, let's create the cosine distance between the articles:
+```{r}
+sim.score <- tcrossprod_simple_triplet_matrix(dtm)/(sqrt( row_sums(dtm^2) %*% t(row_sums(dtm^2)) ))
+```
+and we get the similarity matrix
+```{r}
+sim.score[1:10,1:10]
+```
+## Searching
+
+Having created our similarity matrix, we can leverage that matrix to find a match for any given document. We will be using the `sim.score` created in the previous step to perform the search. Let's say we want to find similar articles to article `36286`:
+```{r}
+match.docs <- sim.score["36286",]
+match.docs
+```
+We go to our `match.doc` similarity matrix and pick up row `36286`. Now, this row has all the other articles and their similarity scores. Let's now take this row and make a data frame:
+```{r}
+match.df <- data.frame(ID = names(match.docs), cosine = match.docs, stringsAsFactors=FALSE)
+match.df$ID <- as.integer(match.df$ID)
+head(match.df)
+```
+Our `match.df` data frame now contains all the matching documents for `36286`. Now, we are going to recommend only the top 30 matches:
+```{r}
+match.refined<-head(match.df[order(-match.df$cosine),],30)
+head(match.refined)
+```
+Now that we have the matching documents, we need to present them in a ranked order. In order to rank the results, we are going to calculate some additional measures and use fuzzy logic to get the final ranking score. Before we go ahead and calculate the additional measures, let's merge `title.df` and `other.df` with `match.refined`:
+```{r}
+colnames(title.df) <- c('ID','TITLE')
+match.refined <- inner_join(match.refined, title.df)
+match.refined <- inner_join(match.refined, others.df)
+head(match.refined)
+```
+## Polarity scores
+
+We are going to leverage the `sentimentr` R package to learn the sentiments of the articles we have collected. Let's look at how to score using the `sentiment` function :
+```{r}
+
+sentiment.score <- sentiment(match.refined$TITLE)
+head(sentiment.score)
+```
+The `sentiment` function in `sentimentr` calculates a score between -1 and 1 for each of the
+articles. If a text has multiple sentences, it will calculate the score for each sentence. A score of -1 indicates that the sentence has a very negative polarity. A score of 1 means that the sentence is very positive. A score of 0 refers to the neutral nature of the sentence.
+
+However, we need the score at an article level and not at a sentence level, so we can take an average value of the score across all the sentences in a text.
+```{r}
+sentiment.score <- sentiment.score %>% group_by(element_id) %>% summarise(sentiment = mean(sentiment))
+head(sentiment.score)
+```
+Here, the `element_id` refers to the individual article. By grouping `element_id` and calculating the average, we can get the sentiment score at an article level. We now have the
+scores for each article. Next we update the `match.refined` data frame with the polarity scores
+```{r}
+match.refined$polarity <- sentiment.score$sentiment
+head(match.refined)
+```
+## Jaccard's distance
+
+While ranking the matched articles, we want to also include the category and publisher columns. Let's proceed to include those columns:
+```{r}
+target.publisher <- match.refined[1,]$PUBLISHER
+target.category <- match.refined[1,]$CATEGORY
+target.polarity <- match.refined[1,]$polarity
+target.title <- match.refined[1,]$TITLE
+```
+
+We need the publisher, category, and the sentiment details of the document we are searching for. Fortunately, the first row of our `match.refined` data frame stores all the details related to `36286`. For the rest of the articles, we need to find out if they match the publisher and category of document `36286`.
+```{r}
+match.refined$is.publisher <- match.refined$PUBLISHER == target.publisher
+match.refined$is.publisher <- as.numeric(match.refined$is.publisher)
+match.refined$is.category <- match.refined$CATEGORY == target.category
+match.refined$is.category <- as.numeric(match.refined$is.category)
+```
+With the two new columns, we can calculate the Jaccard's distance between document `36286` and all the other documents in the `match.refined` data frame.
+```{r}
+match.refined$jaccard <- (match.refined$is.publisher + match.refined$is.category)/2
+```
+
+The Jaccard index measures the similarity between two sets, and is a ratio of the size of the intersection and the size of the union of the participating sets. Here we have only have two elements, one for publisher and one for category, so our union is 2. The numerator, by adding the two Boolean variable, we get the intersection.
+
+Finally, we also calculate the absolute difference (Manhattan distance) in the polarity values between the articles in the search results and our search article. We do a min/max normalization of the difference score.
+```{r}
+match.refined$polaritydiff <- abs(target.polarity - match.refined$polarity)
+
+range01 <- function(x){(x-min(x))/(max(x)-min(x))}
+match.refined$polaritydiff <- range01(unlist(match.refined$polaritydiff))
+head(match.refined)
+```
+We remove some of the unwanted fields from the `match.refined` data frame. Finally, we have the ID, cosine distance, title, publisher, category, Jaccard score, and the polarity difference.
+```{r}
+match.refined$is.publisher = NULL
+match.refined$is.category = NULL
+match.refined$polarity = NULL
+match.refined$sentiment = NULL
+head(match.refined)
+```
+## Ranking search results
+
+We need to perform our ranking based on the following metrics we have calculated:
+* Cosine similarity
+* Jaccard index
+* Polarity difference
+In this project, we will leverage fuzzy logic programming to do the search result ranking. We will be using the `sets` R package for our fuzzy logic programming:
+```{r}
+library(sets)
+sets_options("universe", seq(from = 0, to = 1, by = 0.1))
+```
+The first step is to set up our universe. We define the range of values and the granularity of the values we will be dealing with in our universe. Our cosine, Jaccard, and polarity are all normalized to have a value between zero and one. Hence, the range of our universe is set between zero and one.
+
+The first step in fuzzy logic programming is to define the linguistic variables we will be dealing with:
+```{r}
+variables <- set(
+  cosine = fuzzy_partition(varnames = c(vlow = 0.2, low = 0.4, medium = 0.6, high = 0.8), FUN = fuzzy_cone , radius = 0.2), 
+  jaccard = fuzzy_partition(varnames = c(close = 1.0, halfway = 0.5, far = 0.0), FUN = fuzzy_cone , radius = 0.4), 
+  polarity = fuzzy_partition(varnames = c(same = 0.0, similar = 0.3,close = 0.5, away = 0.7), FUN = fuzzy_cone , radius = 0.2), 
+  ranking = fuzzy_partition(varnames = c(H = 1.0, MED = 0.7 , M = 0.5, L = 0.3), FUN = fuzzy_cone , radius = 0.2))
+```
+
+For each variable, we define the various linguistic values and the `fuzzy membership` function. For example, for our linguistic variable `cosine`, the linguistic values include `vlow, low, medium, and high`.
+
+Based on the interaction between the linguistic variables cosine, jaccard, and polarity, the ranking linguistic variables are assigned different linguistic values. These interactions are defined as rules. Having defined the linguistic variables, the linguistic values, and the membership function, we proceed to write down our fuzzy rules:
+```{r}
+rules <- set(
+######### Low Ranking Rules ###################
+fuzzy_rule(cosine %is% vlow, ranking %is% L),
+fuzzy_rule(cosine %is% low || jaccard %is% far || polarity %is% away, ranking %is% L),
+fuzzy_rule(cosine %is% low || jaccard %is% halfway || polarity %is% away, ranking %is% L),
+fuzzy_rule(cosine %is% low || jaccard %is% halfway || polarity %is% close, ranking %is% L),
+fuzzy_rule(cosine %is% low || jaccard %is% halfway || polarity %is% similar, ranking %is% L),
+fuzzy_rule(cosine %is% low || jaccard %is% halfway || polarity %is% same, ranking %is% L),
+fuzzy_rule(cosine %is% medium || jaccard %is% far || polarity %is% away, ranking %is% L),
+############### Medium Ranking Rules ##################
+fuzzy_rule(cosine %is% low || jaccard %is% close|| polarity %is% same,ranking %is% M),
+fuzzy_rule(cosine %is% low && jaccard %is% close && polarity %is% similar, ranking %is% M),
+############### Median Ranking Rule ##################
+fuzzy_rule(cosine %is% medium && jaccard %is% close && polarity %is% same, ranking %is% MED),
+fuzzy_rule(cosine %is% medium && jaccard %is% halfway && polarity %is% same, ranking %is% MED),
+fuzzy_rule(cosine %is% medium && jaccard %is% close && polarity %is% similar, ranking %is% MED),
+fuzzy_rule(cosine %is% medium && jaccard %is% halfway && polarity %is% similar, ranking %is% MED),
+############## High Ranking Rule #####################
+fuzzy_rule(cosine %is% high,ranking %is% H))
+```
+With the `rules` and `linguistic variables` defined, we can now put our complete fuzzy system together:
+```{r}
+ranking.system <- fuzzy_system(variables, rules)
+print(ranking.system)
+plot(ranking.system)
+```
+The final plot reveals the fuzziness in the boundary for different linguistic variables. Compare this with a hard-coded `if-else` logic system.
+
+We can now proceed to use this system to do the ranking. Let's do the ranking on a single example:
+```{r}
+fi <- fuzzy_inference(ranking.system, list(cosine = 0.5000000, jaccard = 0, polarity=0.00000000))
+gset_defuzzify(fi, "centroid")
+plot(fi)
+```
+For given values of cosine, polarity, and Jaccard, we get a ranking score of 0.4. Now we can use this score to rank the results.
+
+Let's generate the rankings for all the articles in `match.refined`:
+```{r}
+get.ranks <- function(dataframe){
+  cosine = as.numeric(dataframe['cosine'])
+  jaccard = as.numeric(dataframe['jaccard'])
+  polarity = as.numeric(dataframe['polaritydiff'])
+  fi <- fuzzy_inference(ranking.system, list(cosine = cosine, jaccard = jaccard, polarity=polarity))
+  return(gset_defuzzify(fi, "centroid"))
+}
+
+match.refined$ranking <- apply(match.refined, 1, get.ranks)
+match.refined <- match.refined[order(-match.refined$ranking),]
+head(match.refined)
+```
+The `get.ranks` function is applied in each row of `match.refined` to get the fuzzy ranking. Finally, we sort the results using this ranking.
